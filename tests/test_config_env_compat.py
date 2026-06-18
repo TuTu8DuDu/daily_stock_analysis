@@ -78,6 +78,19 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
 
         self.assertEqual(config.alphasift_install_spec, DEFAULT_ALPHASIFT_INSTALL_SPEC)
 
+    def test_env_example_alphasift_install_spec_matches_trusted_default(self):
+        env_example = Path(__file__).resolve().parents[1] / ".env.example"
+
+        for line in env_example.read_text(encoding="utf-8").splitlines():
+            if line.startswith("ALPHASIFT_INSTALL_SPEC="):
+                self.assertEqual(
+                    line,
+                    f"ALPHASIFT_INSTALL_SPEC={DEFAULT_ALPHASIFT_INSTALL_SPEC}",
+                )
+                break
+        else:
+            self.fail("ALPHASIFT_INSTALL_SPEC missing from .env.example")
+
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
     def test_alphasift_install_spec_honors_explicit_empty(
@@ -222,6 +235,36 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
                 config = Config._load_from_env()
 
         self.assertEqual(config.schedule_time, "18:00")
+
+    @patch("src.config.setup_env")
+    @patch.object(Config, "_parse_litellm_yaml", return_value=[])
+    def test_news_intel_env_vars_do_not_affect_llm_layer(
+        self,
+        _mock_parse_yaml,
+        _mock_setup_env,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "STOCK_LIST": "600519",
+                "LITELLM_MODEL": "openai/gpt-5.5",
+                "OPENAI_MODEL": "gpt-5.5",
+                "OPENAI_API_KEY": "sk-openai-test",
+                "OPENAI_BASE_URL": "https://openai.example/v1",
+                "NEWS_INTEL_RETENTION_DAYS": "14",
+                "NEWS_INTEL_FETCH_TIMEOUT_SEC": "12",
+                "NEWS_INTEL_MAX_ITEMS_PER_SOURCE": "75",
+            },
+            clear=True,
+        ):
+            config = Config._load_from_env()
+
+        self.assertEqual(config.litellm_model, "openai/gpt-5.5")
+        self.assertEqual(config.openai_model, "gpt-5.5")
+        self.assertEqual(config.openai_base_url, "https://openai.example/v1")
+        self.assertEqual(config.news_intel_retention_days, 14)
+        self.assertEqual(config.news_intel_fetch_timeout_sec, 12.0)
+        self.assertEqual(config.news_intel_max_items_per_source, 75)
 
     @patch("src.config.setup_env")
     @patch.object(Config, "_parse_litellm_yaml", return_value=[])
