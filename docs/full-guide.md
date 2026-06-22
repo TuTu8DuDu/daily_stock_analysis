@@ -226,6 +226,9 @@ daily_stock_analysis/
 
 | 变量名 | 说明 | 默认值 | 必填 |
 |--------|------|--------|:----:|
+| `GENERATION_BACKEND` | 普通分析生成后端；Phase 1 仅支持 `litellm`，未知值会作为配置错误处理，不静默回退 | `litellm` | 否 |
+| `GENERATION_FALLBACK_BACKEND` | backend 级 fallback；当前 `litellm -> litellm` 解析为 no-op，模型 fallback 仍由 LiteLLM 配置负责 | `litellm` | 否 |
+| `AGENT_GENERATION_BACKEND` | Agent Chat 生成后端；`auto` 在 Phase 1 中等价于现有 LiteLLM tool-calling 后端 | `auto` | 否 |
 | `LITELLM_MODEL` | 主模型，格式 `provider/model`（如 `gemini/gemini-3.1-pro-preview`），推荐优先使用 | - | 否 |
 | `AGENT_LITELLM_MODEL` | Agent 主模型（可选）；留空继承主模型，无 provider 前缀按 `openai/<model>` 解析 | - | 否 |
 | `AGENT_CONTEXT_COMPRESSION_ENABLED` | 问股可见对话上下文压缩开关；默认关闭，开启后仅压缩 `session_id` 下 user/assistant 文本历史 | `false` | 否 |
@@ -235,6 +238,9 @@ daily_stock_analysis/
 | `LITELLM_FALLBACK_MODELS` | 备选模型，逗号分隔 | - | 否 |
 | `LLM_CHANNELS` | 渠道名称列表（逗号分隔），配合 `LLM_{NAME}_*` 使用，详见 [LLM 配置指南](LLM_CONFIG_GUIDE.md) | - | 否 |
 | `LITELLM_CONFIG` | 高级模型路由 YAML 配置文件路径（高级） | - | 否 |
+| `LLM_PROMPT_CACHE_TELEMETRY_ENABLED` | Provider prompt cache usage / diagnostics 遥测；不控制 provider implicit cache | `true` | 否 |
+| `LLM_PROMPT_CACHE_HINTS_ENABLED` | 主分析路径是否主动发送已验证的 provider-specific prompt cache hints；Agent 路径当前仅记录 diagnostics，不主动发 hints；默认关闭 | `false` | 否 |
+| `LLM_PROMPT_CACHE_DIAGNOSTICS_LEVEL` | Prompt cache 诊断级别：`off` / `basic` / `debug`；basic/debug 仅在 debug 日志和测试可观察对象中提供脱敏诊断，不作为公开 Usage API 或普通设置页输出 | `off` | 否 |
 | `LLM_USAGE_HMAC_SECRET` | LLM 用量遥测 message HMAC 密钥；留空时自动使用数据目录中的本地密钥文件 | - | 否 |
 | `LLM_USAGE_HMAC_KEY_VERSION` | LLM 用量遥测 HMAC 密钥版本标签，轮换密钥时同步更新 | `local-v1` | 否 |
 | `ANSPIRE_API_KEYS` | [Anspire](https://open.anspire.cn/?share_code=QFBC0FYC) API Key，一 Key 同时启用大模型网关和搜索 | - | 可选 |
@@ -428,6 +434,7 @@ daily_stock_analysis/
 | `TRADING_DAY_CHECK_ENABLED` | 交易日检查：默认 `true`，非交易日跳过执行；设为 `false` 或使用 `--force-run` 可强制执行（Issue #373） | `true` |
 | `SCHEDULE_ENABLED` | 启用定时任务 | `false` |
 | `SCHEDULE_TIME` | 定时执行时间 | `18:00` |
+| `SCHEDULE_TIMES` | 多个定时执行时间，逗号分隔；为空时使用 `SCHEDULE_TIME` | 空 |
 | `LOG_DIR` | 日志目录 | `./logs` |
 | `SAVE_CONTEXT_SNAPSHOT` | 保存分析历史 `context_snapshot`；设为 `false` 时新历史不保存 enhanced_context、market_phase_summary、AnalysisContextPack overview 或诊断快照，但不关闭当次 Prompt 低敏摘要 | `true` |
 
@@ -705,7 +712,9 @@ python main.py --schedule --no-run-immediately
 
 > 说明：定时模式每次触发前都会重新读取当前保存的 `STOCK_LIST`。如果同时传入 `--stocks`，该参数不会锁定后续计划执行的股票列表；需要临时只跑指定股票时，请使用非定时的单次运行命令。
 >
-> 从 `python main.py --schedule`、`python main.py --serve --schedule` 或等价内置调度模式启动后，WebUI 保存新的 `SCHEDULE_TIME` 会在下一轮调度检查内自动重绑 daily job，无需重启进程；旧的执行时间不会继续保留。
+> 从 `python main.py --schedule` 或等价纯 CLI 调度模式启动后，WebUI 保存新的 `SCHEDULE_TIME` / `SCHEDULE_TIMES` 会在下一轮调度检查内自动重绑 daily jobs，无需重启进程；旧的执行时间不会继续保留。`python main.py --serve --schedule` 会由 Web/API runtime scheduler 接管定时任务，WebUI/API/Desktop 长运行进程保存 `SCHEDULE_ENABLED`、`SCHEDULE_TIME` 或 `SCHEDULE_TIMES` 后会按当前配置启停或重建 runtime scheduler。
+>
+> Web/API runtime scheduler 的立即执行入口只会在没有分析任务运行时接受请求；如果已有分析在执行，会返回忙碌状态而不是假装排队成功。
 
 #### 环境变量方式
 
@@ -715,6 +724,7 @@ python main.py --schedule --no-run-immediately
 |--------|------|:-------:|:-----:|
 | `SCHEDULE_ENABLED` | 是否启用定时任务 | `false` | `true` |
 | `SCHEDULE_TIME` | 每日执行时间 (HH:MM) | `18:00` | `09:30` |
+| `SCHEDULE_TIMES` | 多个每日执行时间，逗号分隔；为空时使用 `SCHEDULE_TIME` | 空 | `09:20,12:30,15:10,18:00` |
 | `SCHEDULE_RUN_IMMEDIATELY` | 定时模式启动时是否立即运行一次；未显式设置时沿用 `RUN_IMMEDIATELY` 的运行时覆盖语义 | `true` | `false` |
 | `RUN_IMMEDIATELY` | 非定时模式启动时是否立即运行一次；同时作为未显式设置 `SCHEDULE_RUN_IMMEDIATELY` 时的 legacy 回退 | `true` | `false` |
 | `TRADING_DAY_CHECK_ENABLED` | 交易日检查：非交易日跳过执行；设为 `false` 可强制执行 | `true` | `false` |
@@ -989,6 +999,8 @@ CUSTOM_WEBHOOK_BODY_TEMPLATE={"msg_type":"text","content":$content_json}
 ```
 
 可用占位符：`$content_json`、`$content`、`$title_json`、`$title`。其中 `$content` / `$title` 是裸字符串，不做 JSON 转义；正文含双引号或换行时可能触发 fallback。
+
+Docker Compose 部署中，通过 Web 设置页保存时会把这些应用占位符写成 `$$content_json` / `$$title_json` 等形式，避免 Compose 重新部署时将其展开为空；应用运行时会还原为单个 `$`。如果手动编辑 Docker 使用的 `.env`，请同样使用 `$$content_json` 这类写法。
 
 Bark 使用全局模板时需显式写出 Bark body：
 
@@ -1333,7 +1345,7 @@ P3 开始，生命周期由 `DecisionSignalService` 统一补齐：显式传入�
 
 这些接口继承现有 `/api/v1/*` 管理员鉴权：`ADMIN_AUTH_ENABLED=true` 时必须携带有效管理员会话 Cookie；本功能不新增独立认证方式。
 
-#1390 P4 在 Web 端接入已有 `DecisionSignal` API，不新增后端契约、数据库表或配置项。侧边栏新增“AI 建议”入口 `/decision-signals`，默认展示 `status=active` 的信号，并支持按市场、股票代码、动作、市场阶段、来源和状态筛选；页面还提供按股票代码查询最新 active 信号的入口。信号详情展示动作、置信度/评分、horizon、plan_quality、market_phase、价格计划、风险、观察条件、来源报告和数据质量；Web 只允许把信号标记为 `closed`、`invalidated` 或 `archived`，不提供 terminal 状态恢复为 active。
+#1390 P4 在 Web 端接入已有 `DecisionSignal` API，不新增后端契约、数据库表或配置项。侧边栏“AI 建议”入口 `/decision-signals` 是结构化决策信号的集中查询入口，默认展示 `status=active` 的信号，并支持按市场、股票代码、动作、市场阶段、来源、来源报告 ID 和状态筛选；页面还提供按股票代码查询最新 active 信号的入口。信号详情展示动作、置信度/评分、horizon、plan_quality、market_phase、价格计划、风险、观察条件、来源报告和数据质量；Web 只允许把信号标记为 `closed`、`invalidated` 或 `archived`，不提供 terminal 状态恢复为 active。
 
 #1390 P5 新增信号级反馈、后验评估和统计 sidecar，不扩展 `decision_signals` 主表，也不复用绑定 `analysis_history_id` 的 `BacktestResult`。`decision_signal_feedback` 按 `signal_id` 保存最新 `useful|not_useful` 反馈、可选原因/备注和来源；`decision_signal_outcomes` 按 `(signal_id, horizon, engine_version)` 幂等保存后验结果，当前 `engine_version=decision-signal-v1`。Outcome 在评估时冻结 `action/market/market_phase/source_type/source_agent/plan_quality/data_quality_level/holding_state` 等统计维度，历史统计不依赖后续 live join 改写。删除历史报告时，会先找出 `source_type=analysis` 且绑定被删历史 ID 的信号，再清理对应 feedback/outcome 子表。
 
@@ -1347,7 +1359,7 @@ P5 在 Web `/decision-signals` 页面筛选区下方展示当前 outcome engine 
 
 #1390 P7 的收口文档见 [DecisionSignal 决策信号专题](decision-signals.md)。P7 不新增 `DECISION_SIGNAL_*` 配置、数据库 migration、API 字段或运行时开关；当前回滚方式为 revert 对应代码。回滚后信号提取和写入停止，既有报告保存、告警触发、通知发送和组合风险主流程不依赖信号池继续运行；历史 signal、feedback 和 outcome 数据不会自动清理。
 
-普通个股历史报告详情会在策略区后展示该报告提取出的 `source_type=analysis` 信号，查询条件为 `source_report_id=<recordId>`；无 `recordId`、大盘复盘或其他非普通个股报告不会发起该查询。空结果显示“本报告暂无决策信号”，加载失败只影响该卡片，不影响报告主体、资讯、运行诊断或透明度区展示。
+普通个股历史报告详情不再内嵌展示该报告提取出的 `source_type=analysis` 信号，也不会因打开报告详情而发起 `source_report_id=<recordId>` 的信号查询；需要查看结构化 AI 建议时统一进入 `/decision-signals` 页面筛选来源报告 ID、打开 `/decision-signals?sourceReportId=<recordId>` deep link，或按股票查询。填写来源报告 ID 或使用该 URL 参数时，Web 会发起 `source_type=analysis + source_report_id=<recordId>` 的精确查询，不叠加默认 `status=active` 等其他列表筛选，以保留旧报告 best-effort 懒回填语义。
 
 ## 回测功能
 
